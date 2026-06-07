@@ -1,284 +1,256 @@
 # Scout
 
-Scout is a VPS (visual positioning system) MVP for drones. This fork of the
-FastAPI full-stack template builds a georeferenced image embedding database:
-upload aerial or satellite imagery with known bounds, split it into patches,
-index patch embeddings in Redis, and search with a test image to estimate
-location.
+Scout is an aerial knowledge acquisition system for drones.
 
-## Scout MVP
+The first Scout capability is a VPS, or visual positioning system: given an
+image from a drone, Scout searches a georeferenced aerial image database and
+returns the most likely location. The larger goal is broader than positioning.
+Scout should acquire, extract, and reason over knowledge from aerial imagery:
+terrain features, infrastructure, hazards, scene state, objects, temporal
+change, and operational context.
 
-- Backend: FastAPI, SQLModel/Postgres, Redis vector search, optional Weave tracing.
-- Frontend: React/Vite dashboard for dataset import, index health, and image search.
-- Current ingestion path: upload a normal image plus west/south/east/north bounds.
-- Current embedding model: deterministic local grayscale image embedding for MVP smoke tests.
-- Runtime imagery storage: `backend/scout-data/`, ignored by git.
+This repository is a fork of the FastAPI full-stack template, adapted into a
+full-stack Scout MVP with a FastAPI backend, React dashboard, Postgres metadata,
+Redis vector search, and Weave tracing.
 
-### Run Locally
+## Current MVP
 
-Start Docker Desktop first, then run:
+The current implementation builds and searches an image embedding database for
+San Francisco aerial imagery.
+
+- Ingest georeferenced aerial imagery with known bounds.
+- Tile imagery into overlapping patches.
+- Store patch metadata and geospatial bounds in Postgres.
+- Embed patches with a deterministic local image descriptor.
+- Store vectors in Redis Stack for nearest-neighbor search.
+- Upload a query image and return likely coordinates plus visual match previews.
+- Generate holdout query examples that are shifted/zoomed crops, not exact
+  duplicates of indexed images.
+- Emit traces with Weave when `WEAVE_ENABLED=True` and `WANDB_API_KEY` is set.
+
+The current embedding model is:
+
+```text
+scout-pil-equalized-grayscale-32x32-v1
+```
+
+It is a lightweight 1024-dimensional PIL/NumPy descriptor intended for MVP
+plumbing and smoke tests. It is not the final VPS model. Future model candidates
+include CLIP/SigLIP-style vision embeddings, DINOv2, geospatial foundation
+models, YOLO-family detectors, SAM-family segmentation models, and task-specific
+fine-tuned aerial imagery models.
+
+## Scout As Knowledge Acquisition
+
+Scout should maintain an evolving world model of an area, not just a vector
+index. Each image, detection, feature, and agent conclusion becomes structured
+knowledge that can be searched, compared, audited, and acted on.
+
+Core knowledge objects:
+
+- **Imagery**: raw drone frames, satellite images, orthophotos, map tiles, and
+  derived crops.
+- **Position evidence**: visual matches, candidate coordinates, confidence,
+  geospatial bounds, and traceable source patches.
+- **Scene features**: roads, intersections, rooftops, water, vegetation,
+  construction, terrain, landing zones, smoke, debris, vehicles, people, and
+  other operationally relevant features.
+- **Object detections**: model outputs from detectors such as YOLOv8n or later
+  aerial-specific detectors.
+- **Temporal observations**: change over time, anomaly events, repeated
+  sightings, and confidence deltas.
+- **Operational actions**: alerts, human review queues, authority notifications,
+  mission recommendations, and audit logs.
+
+The system should answer questions such as:
+
+- Where is this drone image most likely located?
+- What important features are visible in this aerial image?
+- What changed since the last known image of this area?
+- Is there smoke, fire, flooding, blocked road access, or other urgent evidence?
+- What should be escalated to a human operator or external authority?
+
+## Multi-Agent Orchestration
+
+Scout will use multiple specialized agents coordinated around a shared aerial
+knowledge graph, image store, vector index, and event bus. Agents should be
+small, observable, and task-specific. Each agent receives evidence, produces
+structured outputs, and records traces through Weave.
+
+Planned orchestration pattern:
+
+- **Coordinator agent**: receives imagery, mission context, and operator goals;
+  decides which specialist agents to run.
+- **Shared memory**: Postgres for structured metadata, Redis for fast vector and
+  cache lookups, object storage/local storage for imagery, and later a graph
+  layer for relationships.
+- **Model adapters**: isolated services for embedding, detection, segmentation,
+  OCR, geocoding, and change detection.
+- **Policy layer**: controls escalation, confidence thresholds, rate limits,
+  privacy boundaries, and authority notification rules.
+- **Human review loop**: routes uncertain or high-impact events to operators
+  before irreversible actions.
+- **Traceability**: every agent run should record inputs, model version, output,
+  confidence, and downstream action in Weave.
+
+## Agent Use Cases
+
+1. **Visual localization agent**: estimates drone position by matching a query
+   frame against georeferenced aerial patches.
+2. **VPS confidence agent**: evaluates whether localization evidence is strong
+   enough to trust or whether GPS/manual review is needed.
+3. **Smoke detection agent**: detects smoke plumes, estimates spread direction,
+   and escalates likely fire events.
+4. **Fire hotspot agent**: combines visual smoke/fire evidence with thermal or
+   external signals when available.
+5. **Authority notification agent**: prepares structured alerts for fire
+   departments, police, emergency operations, or internal dispatch teams.
+6. **Object detection agent**: runs YOLOv8n or a later aerial detector for cars,
+   trucks, boats, people, aircraft, heavy equipment, and other classes.
+7. **Road blockage agent**: identifies blocked roads, stalled traffic, debris,
+   emergency vehicles, or inaccessible routes.
+8. **Landing zone agent**: finds candidate safe landing or emergency landing
+   zones based on flatness, obstacles, roads, people, and restricted areas.
+9. **Infrastructure inspection agent**: detects damage or anomalies around
+   bridges, towers, substations, rooftops, solar farms, and rail corridors.
+10. **Construction progress agent**: compares imagery over time to measure
+    construction state, material staging, excavation, and equipment movement.
+11. **Flood detection agent**: identifies water accumulation, coastline change,
+    flooded streets, and water encroachment near infrastructure.
+12. **Vegetation and fuel-load agent**: maps vegetation density, dry brush, tree
+    canopy, and fire-risk features near assets.
+13. **Change detection agent**: compares new imagery against prior indexed
+    imagery and flags meaningful scene changes.
+14. **Anomaly detection agent**: finds unusual patterns without a fixed class
+    list, such as unexpected gatherings, unknown objects, or sudden surface
+    changes.
+15. **Perimeter monitoring agent**: tracks boundaries around restricted zones,
+    events, fires, construction sites, or security-sensitive areas.
+16. **Search-and-rescue agent**: scans imagery for people, vehicles, signals,
+    shelters, trails, and plausible movement corridors.
+17. **Maritime awareness agent**: detects boats, wakes, docks, shoreline
+    activity, and waterway obstructions.
+18. **Urban feature extraction agent**: extracts intersections, crosswalks,
+    roof shapes, parking lots, parks, sports fields, and landmarks useful for
+    localization and planning.
+19. **Dataset curation agent**: selects high-value imagery for indexing,
+    removes duplicates, balances geography, and creates holdout evaluation
+    sets.
+20. **Model evaluation agent**: runs benchmark queries, measures localization
+    error, detection quality, drift, and regression risk across model versions.
+
+## Data Sources
+
+The current SF seed uses USGS NAIP Plus imagery. Additional candidate sources
+for future ingestion adapters include:
+
+- USGS NAIP Plus / The National Map imagery services.
+- NOAA aerial and coastal imagery archives.
+- OpenAerialMap, where suitable openly licensed imagery exists.
+- DataSF and San Francisco GIS imagery resources.
+- Sentinel-2 or Landsat for low-resolution context and high-altitude tests.
+- Future drone-collected Scout imagery with known pose or reviewed ground truth.
+
+## Local Development
+
+Start Docker Desktop, then run:
 
 ```bash
 docker compose up --build
 ```
 
-Open the dashboard at `http://localhost:5173` and log in with the `.env`
-superuser. Use the Scout page to import imagery for San Francisco or another
-bounded area, then query the index with a cropped test image.
+The dashboard is available at:
 
-### Seed San Francisco Test Imagery
+```text
+http://localhost:5173
+```
 
-After the app is running, seed a small San Francisco image index from USGS NAIP
-Plus imagery:
+The API is available at:
+
+```text
+http://localhost:8000
+```
+
+Set local secrets in `.env`. The `.env` file is intentionally ignored by git.
+Use `.env.example` as the safe template.
+
+## Seed San Francisco
+
+Seed or rebuild the SF index from the backend container:
 
 ```bash
 docker compose exec backend python -m app.scout.seed_sf --clear
 ```
 
-The default seed downloads four SF chips, tiles them into overlapping patches,
-embeds each patch, stores metadata in Postgres, and upserts vectors into Redis.
-For a faster first test:
+For a faster first pass:
 
 ```bash
-docker compose exec backend python -m app.scout.seed_sf --clear --chips 1 --image-size 512
+docker compose exec backend python -m app.scout.seed_sf --clear --profile quick --chips 1 --image-size 512
 ```
 
-Weave instrumentation is enabled by default with `WEAVE_ENABLED=True`. Set
-`WANDB_API_KEY` in `.env`, then rebuild/restart the backend to emit traces for
-import, embedding, and search runs.
-
-## Template Base
-
-This project started from the upstream FastAPI full-stack template.
-
-<a href="https://github.com/fastapi/full-stack-fastapi-template/actions?query=workflow%3A%22Test+Docker+Compose%22" target="_blank"><img src="https://github.com/fastapi/full-stack-fastapi-template/workflows/Test%20Docker%20Compose/badge.svg" alt="Test Docker Compose"></a>
-<a href="https://github.com/fastapi/full-stack-fastapi-template/actions?query=workflow%3A%22Test+Backend%22" target="_blank"><img src="https://github.com/fastapi/full-stack-fastapi-template/workflows/Test%20Backend/badge.svg" alt="Test Backend"></a>
-<a href="https://coverage-badge.samuelcolvin.workers.dev/redirect/fastapi/full-stack-fastapi-template" target="_blank"><img src="https://coverage-badge.samuelcolvin.workers.dev/fastapi/full-stack-fastapi-template.svg" alt="Coverage"></a>
-
-## Technology Stack and Features
-
-- ⚡ [**FastAPI**](https://fastapi.tiangolo.com) for the Python backend API.
-  - 🧰 [SQLModel](https://sqlmodel.tiangolo.com) for the Python SQL database interactions (ORM).
-  - 🔍 [Pydantic](https://docs.pydantic.dev), used by FastAPI, for the data validation and settings management.
-  - 💾 [PostgreSQL](https://www.postgresql.org) as the SQL database.
-- 🚀 [React](https://react.dev) for the frontend.
-  - 💃 Using TypeScript, hooks, [Vite](https://vitejs.dev), and other parts of a modern frontend stack.
-  - 🎨 [Tailwind CSS](https://tailwindcss.com) and [shadcn/ui](https://ui.shadcn.com) for the frontend components.
-  - 🤖 An automatically generated frontend client.
-  - 🧪 [Playwright](https://playwright.dev) for End-to-End testing.
-  - 🦇 Dark mode support.
-- 🐋 [Docker Compose](https://www.docker.com) for development and production.
-- 🔒 Secure password hashing by default.
-- 🔑 JWT (JSON Web Token) authentication.
-- 📫 Email based password recovery.
-- 📬 [Mailcatcher](https://mailcatcher.me) for local email testing during development.
-- ✅ Tests with [Pytest](https://pytest.org).
-- 📞 [Traefik](https://traefik.io) as a reverse proxy / load balancer.
-- 🚢 Deployment instructions using Docker Compose, including how to set up a frontend Traefik proxy to handle automatic HTTPS certificates.
-- 🏭 CI (continuous integration) and CD (continuous deployment) based on GitHub Actions.
-
-### Dashboard Login
-
-[![API docs](img/login.png)](https://github.com/fastapi/full-stack-fastapi-template)
-
-### Dashboard - Admin
-
-[![API docs](img/dashboard.png)](https://github.com/fastapi/full-stack-fastapi-template)
-
-### Dashboard - Items
-
-[![API docs](img/dashboard-items.png)](https://github.com/fastapi/full-stack-fastapi-template)
-
-### Dashboard - Dark Mode
-
-[![API docs](img/dashboard-dark.png)](https://github.com/fastapi/full-stack-fastapi-template)
-
-### Interactive API Documentation
-
-[![API docs](img/docs.png)](https://github.com/fastapi/full-stack-fastapi-template)
-
-## How To Use It
-
-You can **just fork or clone** this repository and use it as is.
-
-✨ It just works. ✨
-
-### How to Use a Private Repository
-
-If you want to have a private repository, GitHub won't allow you to simply fork it as it doesn't allow changing the visibility of forks.
-
-But you can do the following:
-
-- Create a new GitHub repo, for example `my-full-stack`.
-- Clone this repository manually, set the name with the name of the project you want to use, for example `my-full-stack`:
+The expanded profile builds multiple SF chips across different apparent
+altitude scales and creates holdout examples:
 
 ```bash
-git clone git@github.com:fastapi/full-stack-fastapi-template.git my-full-stack
+docker compose exec backend python -m app.scout.seed_sf --clear --profile expanded --examples 10
 ```
 
-- Enter into the new directory:
+## Weave Tracing
+
+Weave is enabled by default:
+
+```text
+WEAVE_ENABLED=True
+WEAVE_PROJECT=scout
+```
+
+Set `WANDB_API_KEY` in local `.env`, then restart the backend:
 
 ```bash
-cd my-full-stack
+docker compose up -d --build backend
 ```
 
-- Set the new origin to your new repository, copy it from the GitHub interface, for example:
+Scout traces cover embedding, indexing, import, and image search operations.
+
+## Redis
+
+Redis Stack is used for vector search. The local Docker override maps Redis to
+host port `6380` to avoid conflicts with any Redis already running on `6379`.
+
+```text
+redis://localhost:6380/0
+```
+
+Inside Docker services, the app uses:
+
+```text
+redis://redis:6379/0
+```
+
+## Verification
+
+Useful local checks:
 
 ```bash
-git remote set-url origin git@github.com:octocat/my-full-stack.git
+cd backend && uv run ruff check app && uv run ty check app
+npm --prefix frontend run build
+docker compose up -d --build backend frontend
 ```
 
-- Add this repo as another "remote" to allow you to get updates later:
+## Roadmap
 
-```bash
-git remote add upstream git@github.com:fastapi/full-stack-fastapi-template.git
-```
-
-- Push the code to your new repository:
-
-```bash
-git push -u origin master
-```
-
-### Update From the Original Template
-
-After cloning the repository, and after doing changes, you might want to get the latest changes from this original template.
-
-- Make sure you added the original repository as a remote, you can check it with:
-
-```bash
-git remote -v
-
-origin    git@github.com:octocat/my-full-stack.git (fetch)
-origin    git@github.com:octocat/my-full-stack.git (push)
-upstream    git@github.com:fastapi/full-stack-fastapi-template.git (fetch)
-upstream    git@github.com:fastapi/full-stack-fastapi-template.git (push)
-```
-
-- Pull the latest changes without merging:
-
-```bash
-git pull --no-commit upstream master
-```
-
-This will download the latest changes from this template without committing them, that way you can check everything is right before committing.
-
-- If there are conflicts, solve them in your editor.
-
-- Once you are done, commit the changes:
-
-```bash
-git merge --continue
-```
-
-### Configure
-
-You can then update configs in the `.env` files to customize your configurations.
-
-Before deploying it, make sure you change at least the values for:
-
-- `SECRET_KEY`
-- `FIRST_SUPERUSER_PASSWORD`
-- `POSTGRES_PASSWORD`
-
-You can (and should) pass these as environment variables from secrets.
-
-Read the [deployment.md](./deployment.md) docs for more details.
-
-### Generate Secret Keys
-
-Some environment variables in the `.env` file have a default value of `changethis`.
-
-You have to change them with a secret key, to generate secret keys you can run the following command:
-
-```bash
-python -c "import secrets; print(secrets.token_urlsafe(32))"
-```
-
-Copy the content and use that as password / secret key. And run that again to generate another secure key.
-
-## How To Use It - Alternative With Copier
-
-This repository also supports generating a new project using [Copier](https://copier.readthedocs.io).
-
-It will copy all the files, ask you configuration questions, and update the `.env` files with your answers.
-
-### Install Copier
-
-You can install Copier with:
-
-```bash
-pip install copier
-```
-
-Or better, if you have [`pipx`](https://pipx.pypa.io/), you can run it with:
-
-```bash
-pipx install copier
-```
-
-**Note**: If you have `pipx`, installing copier is optional, you could run it directly.
-
-### Generate a Project With Copier
-
-Decide a name for your new project's directory, you will use it below. For example, `my-awesome-project`.
-
-Go to the directory that will be the parent of your project, and run the command with your project's name:
-
-```bash
-copier copy https://github.com/fastapi/full-stack-fastapi-template my-awesome-project --trust
-```
-
-If you have `pipx` and you didn't install `copier`, you can run it directly:
-
-```bash
-pipx run copier copy https://github.com/fastapi/full-stack-fastapi-template my-awesome-project --trust
-```
-
-**Note** the `--trust` option is necessary to be able to execute a [post-creation script](https://github.com/fastapi/full-stack-fastapi-template/blob/master/.copier/update_dotenv.py) that updates your `.env` files.
-
-### Input Variables
-
-Copier will ask you for some data, you might want to have at hand before generating the project.
-
-But don't worry, you can just update any of that in the `.env` files afterwards.
-
-The input variables, with their default values (some auto generated) are:
-
-- `project_name`: (default: `"FastAPI Project"`) The name of the project, shown to API users (in .env).
-- `stack_name`: (default: `"fastapi-project"`) The name of the stack used for Docker Compose labels and project name (no spaces, no periods) (in .env).
-- `secret_key`: (default: `"changethis"`) The secret key for the project, used for security, stored in .env, you can generate one with the method above.
-- `first_superuser`: (default: `"admin@example.com"`) The email of the first superuser (in .env).
-- `first_superuser_password`: (default: `"changethis"`) The password of the first superuser (in .env).
-- `smtp_host`: (default: "") The SMTP server host to send emails, you can set it later in .env.
-- `smtp_user`: (default: "") The SMTP server user to send emails, you can set it later in .env.
-- `smtp_password`: (default: "") The SMTP server password to send emails, you can set it later in .env.
-- `emails_from_email`: (default: `"info@example.com"`) The email account to send emails from, you can set it later in .env.
-- `postgres_password`: (default: `"changethis"`) The password for the PostgreSQL database, stored in .env, you can generate one with the method above.
-- `sentry_dsn`: (default: "") The DSN for Sentry, if you are using it, you can set it later in .env.
-
-## Backend Development
-
-Backend docs: [backend/README.md](./backend/README.md).
-
-## Frontend Development
-
-Frontend docs: [frontend/README.md](./frontend/README.md).
-
-## Deployment
-
-Deployment docs: [deployment.md](./deployment.md).
-
-## Development
-
-General development docs: [development.md](./development.md).
-
-This includes using Docker Compose, custom local domains, `.env` configurations, etc.
-
-## Release Notes
-
-Check the file [release-notes.md](./release-notes.md).
+- Replace the MVP descriptor with a stronger aerial/geospatial embedding model.
+- Add dedicated model services for object detection and segmentation.
+- Add an evaluation harness with known-location query sets and localization
+  error metrics.
+- Add agent run tables, agent outputs, confidence policies, and review queues.
+- Add imagery source adapters beyond USGS NAIP Plus.
+- Add map visualization, geofences, mission timeline views, and operator review
+  workflows.
+- Add authority notification integrations behind explicit policy and human
+  approval controls.
 
 ## License
 
-The Full Stack FastAPI Template is licensed under the terms of the MIT license.
+This project inherits the upstream template license unless replaced by a Scout
+project license.
