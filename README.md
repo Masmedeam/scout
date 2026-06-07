@@ -1,4 +1,55 @@
-# Full Stack FastAPI Template
+# Scout
+
+Scout is a VPS (visual positioning system) MVP for drones. This fork of the
+FastAPI full-stack template builds a georeferenced image embedding database:
+upload aerial or satellite imagery with known bounds, split it into patches,
+index patch embeddings in Redis, and search with a test image to estimate
+location.
+
+## Scout MVP
+
+- Backend: FastAPI, SQLModel/Postgres, Redis vector search, optional Weave tracing.
+- Frontend: React/Vite dashboard for dataset import, index health, and image search.
+- Current ingestion path: upload a normal image plus west/south/east/north bounds.
+- Current embedding model: deterministic local grayscale image embedding for MVP smoke tests.
+- Runtime imagery storage: `backend/scout-data/`, ignored by git.
+
+### Run Locally
+
+Start Docker Desktop first, then run:
+
+```bash
+docker compose up --build
+```
+
+Open the dashboard at `http://localhost:5173` and log in with the `.env`
+superuser. Use the Scout page to import imagery for San Francisco or another
+bounded area, then query the index with a cropped test image.
+
+### Seed San Francisco Test Imagery
+
+After the app is running, seed a small San Francisco image index from USGS NAIP
+Plus imagery:
+
+```bash
+docker compose exec backend python -m app.scout.seed_sf --clear
+```
+
+The default seed downloads four SF chips, tiles them into overlapping patches,
+embeds each patch, stores metadata in Postgres, and upserts vectors into Redis.
+For a faster first test:
+
+```bash
+docker compose exec backend python -m app.scout.seed_sf --clear --chips 1 --image-size 512
+```
+
+Weave instrumentation is enabled by default with `WEAVE_ENABLED=True`. Set
+`WANDB_API_KEY` in `.env`, then rebuild/restart the backend to emit traces for
+import, embedding, and search runs.
+
+## Template Base
+
+This project started from the upstream FastAPI full-stack template.
 
 <a href="https://github.com/fastapi/full-stack-fastapi-template/actions?query=workflow%3A%22Test+Docker+Compose%22" target="_blank"><img src="https://github.com/fastapi/full-stack-fastapi-template/workflows/Test%20Docker%20Compose/badge.svg" alt="Test Docker Compose"></a>
 <a href="https://github.com/fastapi/full-stack-fastapi-template/actions?query=workflow%3A%22Test+Backend%22" target="_blank"><img src="https://github.com/fastapi/full-stack-fastapi-template/workflows/Test%20Backend/badge.svg" alt="Test Backend"></a>

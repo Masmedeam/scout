@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     POSTGRES_USER: str
     POSTGRES_PASSWORD: str = ""
     POSTGRES_DB: str = ""
+    REDIS_URL: str = "redis://redis:6379/0"
+    SCOUT_STORAGE_DIR: str = "scout-data"
+    SCOUT_EMBEDDING_DIM: int = 1024
+    SCOUT_REDIS_INDEX: str = "scout-patches"
+    WEAVE_ENABLED: bool = True
+    WEAVE_PROJECT: str = "scout"
 
     @computed_field  # type: ignore[prop-decorator]
     @property

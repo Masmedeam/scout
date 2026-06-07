@@ -1,0 +1,1 @@
+"""Scout image geolocation services."""

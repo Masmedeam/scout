@@ -50,6 +50,11 @@ services:
     ports:
       - "5432:5432"
 
+  redis:
+    restart: "no"
+    ports:
+      - "6380:6379"
+
   adminer:
     restart: "no"
     ports:
@@ -81,6 +86,7 @@ services:
     # TODO: remove once coverage is done locally
     volumes:
       - ./backend/htmlcov:/app/backend/htmlcov
+      - ./backend/scout-data:/app/backend/scout-data
     environment:
       SMTP_HOST: "mailcatcher"
       SMTP_PORT: "1025"

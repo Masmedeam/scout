@@ -1,0 +1,13 @@
+.git
+.venv
+backend/.venv
+backend/htmlcov
+backend/scout-data
+frontend/node_modules
+frontend/dist
+frontend/blob-report
+frontend/playwright-report
+frontend/test-results
+node_modules
+**/__pycache__
+**/*.pyc

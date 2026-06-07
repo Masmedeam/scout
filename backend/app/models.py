@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 from pydantic import EmailStr
-from sqlalchemy import DateTime
+from sqlalchemy import JSON, Column, DateTime
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -106,6 +106,172 @@ class ItemPublic(ItemBase):
 class ItemsPublic(SQLModel):
     data: list[ItemPublic]
     count: int
+
+
+# Scout geospatial image index models
+class ScoutLocationBase(SQLModel):
+    name: str = Field(min_length=1, max_length=255, unique=True, index=True)
+    west: float
+    south: float
+    east: float
+    north: float
+    description: str | None = Field(default=None, max_length=500)
+
+
+class ScoutLocationCreate(ScoutLocationBase):
+    pass
+
+
+class ScoutLocation(ScoutLocationBase, table=True):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    created_at: datetime | None = Field(
+        default_factory=get_datetime_utc,
+        sa_type=DateTime(timezone=True),  # type: ignore
+    )
+    raster_assets: list["ScoutRasterAsset"] = Relationship(
+        back_populates="location", cascade_delete=True
+    )
+
+
+class ScoutLocationPublic(ScoutLocationBase):
+    id: uuid.UUID
+    created_at: datetime | None = None
+
+
+class ScoutLocationsPublic(SQLModel):
+    data: list[ScoutLocationPublic]
+    count: int
+
+
+class ScoutRasterAssetBase(SQLModel):
+    source_provider: str = Field(default="local", max_length=100)
+    source_uri: str | None = Field(default=None, max_length=1000)
+    license: str | None = Field(default=None, max_length=255)
+    capture_date: str | None = Field(default=None, max_length=50)
+    file_path: str = Field(max_length=1000)
+    width: int
+    height: int
+    west: float
+    south: float
+    east: float
+    north: float
+
+
+class ScoutRasterAsset(ScoutRasterAssetBase, table=True):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    created_at: datetime | None = Field(
+        default_factory=get_datetime_utc,
+        sa_type=DateTime(timezone=True),  # type: ignore
+    )
+    location_id: uuid.UUID = Field(
+        foreign_key="scoutlocation.id", nullable=False, ondelete="CASCADE"
+    )
+    location: ScoutLocation | None = Relationship(back_populates="raster_assets")
+    patches: list["ScoutImagePatch"] = Relationship(
+        back_populates="raster_asset", cascade_delete=True
+    )
+
+
+class ScoutRasterAssetPublic(ScoutRasterAssetBase):
+    id: uuid.UUID
+    location_id: uuid.UUID
+    created_at: datetime | None = None
+
+
+class ScoutImagePatchBase(SQLModel):
+    file_path: str = Field(max_length=1000)
+    pixel_x: int
+    pixel_y: int
+    width: int
+    height: int
+    west: float
+    south: float
+    east: float
+    north: float
+    center_lat: float
+    center_lon: float
+    embedding_model: str = Field(max_length=100)
+    embedding_dim: int
+    redis_key: str = Field(max_length=255, index=True)
+
+
+class ScoutImagePatch(ScoutImagePatchBase, table=True):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    created_at: datetime | None = Field(
+        default_factory=get_datetime_utc,
+        sa_type=DateTime(timezone=True),  # type: ignore
+    )
+    raster_asset_id: uuid.UUID = Field(
+        foreign_key="scoutrasterasset.id", nullable=False, ondelete="CASCADE"
+    )
+    raster_asset: ScoutRasterAsset | None = Relationship(back_populates="patches")
+
+
+class ScoutImagePatchPublic(ScoutImagePatchBase):
+    id: uuid.UUID
+    raster_asset_id: uuid.UUID
+    created_at: datetime | None = None
+
+
+class ScoutSearchMatch(SQLModel):
+    patch_id: uuid.UUID
+    score: float
+    center_lat: float
+    center_lon: float
+    west: float
+    south: float
+    east: float
+    north: float
+    file_path: str
+    preview_url: str | None = None
+
+
+class ScoutSearchRun(SQLModel, table=True):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    created_at: datetime | None = Field(
+        default_factory=get_datetime_utc,
+        sa_type=DateTime(timezone=True),  # type: ignore
+    )
+    query_image_path: str = Field(max_length=1000)
+    top_k: int
+    predicted_lat: float | None = None
+    predicted_lon: float | None = None
+    matches: list[dict] = Field(default_factory=list, sa_column=Column(JSON))
+
+
+class ScoutSearchRunPublic(SQLModel):
+    id: uuid.UUID
+    created_at: datetime | None = None
+    query_image_path: str
+    top_k: int
+    predicted_lat: float | None = None
+    predicted_lon: float | None = None
+    matches: list[ScoutSearchMatch]
+
+
+class ScoutIndexStatus(SQLModel):
+    locations: int
+    raster_assets: int
+    patches: int
+    redis_available: bool
+    redis_index: str
+    embedding_model: str
+    embedding_dim: int
+
+
+class ScoutImportResult(SQLModel):
+    location: ScoutLocationPublic
+    raster_asset: ScoutRasterAssetPublic
+    patches_created: int
+    redis_indexed: int
+
+
+class ScoutExampleImage(SQLModel):
+    id: str
+    label: str
+    center_lat: float
+    center_lon: float
+    preview_url: str
 
 
 # Generic message
