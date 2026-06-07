@@ -35,7 +35,11 @@ class ScoutVectorStore:
         if self.client is None:
             return
         try:
-            self.client.execute_command("FT.INFO", self.index_name)
+            raw_info = self.client.execute_command("FT.INFO", self.index_name)
+            existing_dim = _extract_vector_dim(raw_info)
+            if existing_dim == self.dim:
+                return
+            self.reset_index()
             return
         except Exception:
             pass
@@ -76,10 +80,9 @@ class ScoutVectorStore:
         if self.client is None:
             return
         try:
-            self.client.execute_command("FT.DROPINDEX", self.index_name)
+            self.client.execute_command("FT.DROPINDEX", self.index_name, "DD")
         except Exception:
             pass
-        self.clear_vectors()
         self.ensure_index()
 
     def clear_vectors(self) -> None:
@@ -106,6 +109,8 @@ class ScoutVectorStore:
         embedding: np.ndarray,
     ) -> str:
         key = f"{self.prefix}{patch_id}"
+        if embedding.shape != (self.dim,):
+            raise ValueError(f"Expected {self.dim}-dim embedding, got {embedding.shape}")
         if self.client is None:
             return key
         self.ensure_index()
@@ -124,6 +129,8 @@ class ScoutVectorStore:
 
     @scout_op("search_patch_embeddings")
     def search(self, embedding: np.ndarray, top_k: int = 5) -> list[VectorMatch]:
+        if embedding.shape != (self.dim,):
+            raise ValueError(f"Expected {self.dim}-dim embedding, got {embedding.shape}")
         if self.client is None:
             return []
         self.ensure_index()
@@ -202,3 +209,24 @@ def _decode(value: Any) -> str:
     if isinstance(value, bytes):
         return value.decode()
     return str(value)
+
+
+def _extract_vector_dim(raw_info: Any) -> int | None:
+    if not isinstance(raw_info, list):
+        return None
+    for index, value in enumerate(raw_info):
+        if value == b"attributes" or value == "attributes":
+            attributes = raw_info[index + 1] if index + 1 < len(raw_info) else []
+            if not isinstance(attributes, list):
+                return None
+            for attribute in attributes:
+                if not isinstance(attribute, list):
+                    continue
+                data = _field_list_to_dict(attribute)
+                identifier = data.get(b"identifier") or data.get("identifier")
+                if _decode(identifier) != "embedding":
+                    continue
+                dim = data.get(b"dim") or data.get("dim") or data.get(b"DIM") or data.get("DIM")
+                if dim is not None:
+                    return int(_decode(dim))
+    return None

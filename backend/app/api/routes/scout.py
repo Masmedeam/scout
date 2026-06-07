@@ -26,6 +26,12 @@ from app.models import (
 )
 from app.scout.embedding import MODEL_NAME, embed_image
 from app.scout.geo import GeoBounds
+from app.scout.postgres_vector_store import (
+    count_postgres_embeddings,
+    rebuild_redis_from_postgres,
+    search_patch_embeddings,
+    store_patch_embedding,
+)
 from app.scout.query_examples import get_query_example_path, read_query_examples
 from app.scout.storage import save_upload
 from app.scout.tiling import tile_raster
@@ -79,6 +85,7 @@ def read_index_status(session: SessionDep, _current_user: CurrentUser) -> Any:
             select(func.count()).select_from(ScoutRasterAsset)
         ).one(),
         patches=session.exec(select(func.count()).select_from(ScoutImagePatch)).one(),
+        postgres_vectors=count_postgres_embeddings(session),
         redis_available=store.available,
         redis_index=store.index_name,
         embedding_model=MODEL_NAME,
@@ -225,6 +232,7 @@ def import_imagery(
         session.add(patch)
         session.flush()
         embedding = embed_image(patch.file_path)
+        store_patch_embedding(patch, embedding)
         redis_key = store.upsert_patch(
             patch_id=patch.id,
             location_id=location.id,
@@ -267,6 +275,10 @@ def search_image(
 
     store = ScoutVectorStore()
     vector_matches = store.search(embedding, top_k=top_k)
+    if not vector_matches:
+        vector_matches = search_patch_embeddings(session, embedding, top_k=top_k)
+        if vector_matches and store.available:
+            rebuild_redis_from_postgres(session, store, clear=True)
     matches: list[ScoutSearchMatch] = []
     for vector_match in vector_matches:
         patch = session.get(ScoutImagePatch, vector_match.patch_id)

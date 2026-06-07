@@ -1,9 +1,12 @@
 import uuid
 from datetime import datetime, timezone
 
+from pgvector.sqlalchemy import Vector
 from pydantic import EmailStr
 from sqlalchemy import JSON, Column, DateTime
 from sqlmodel import Field, Relationship, SQLModel
+
+from app.core.config import settings
 
 
 def get_datetime_utc() -> datetime:
@@ -205,6 +208,10 @@ class ScoutImagePatch(ScoutImagePatchBase, table=True):
         foreign_key="scoutrasterasset.id", nullable=False, ondelete="CASCADE"
     )
     raster_asset: ScoutRasterAsset | None = Relationship(back_populates="patches")
+    embedding: list[float] | None = Field(
+        default=None,
+        sa_column=Column(Vector(settings.SCOUT_EMBEDDING_DIM), nullable=True),
+    )
 
 
 class ScoutImagePatchPublic(ScoutImagePatchBase):
@@ -253,6 +260,7 @@ class ScoutIndexStatus(SQLModel):
     locations: int
     raster_assets: int
     patches: int
+    postgres_vectors: int
     redis_available: bool
     redis_index: str
     embedding_model: str

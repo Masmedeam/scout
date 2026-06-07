@@ -9,6 +9,7 @@ from app.core.config import settings
 from app.models import ScoutImagePatch
 from app.scout.embedding import embed_image
 from app.scout.geo import GeoBounds, pixel_to_lat, pixel_to_lon
+from app.scout.postgres_vector_store import search_patch_embeddings
 from app.scout.storage import ensure_storage_dirs
 from app.scout.vector_store import ScoutVectorStore
 
@@ -52,24 +53,30 @@ def create_query_examples(session: Session, limit: int = 10) -> list[dict]:
             variant_index=index,
         )
 
+        query_embedding = embed_image(output_path)
         if store.available:
-            matches = store.search(embed_image(output_path), top_k=1)
-            if not matches:
-                output_path.unlink(missing_ok=True)
-                continue
-            matched_patch = session.get(ScoutImagePatch, matches[0].patch_id)
-            if matched_patch is None:
-                output_path.unlink(missing_ok=True)
-                continue
-            error_meters = haversine_meters(
-                patch.center_lat,
-                patch.center_lon,
-                matched_patch.center_lat,
-                matched_patch.center_lon,
-            )
-            if error_meters > MAX_VALIDATION_ERROR_METERS:
-                output_path.unlink(missing_ok=True)
-                continue
+            matches = store.search(query_embedding, top_k=1)
+        else:
+            matches = search_patch_embeddings(session, query_embedding, top_k=1)
+        if not matches and store.available:
+            matches = search_patch_embeddings(session, query_embedding, top_k=1)
+        if not matches:
+            output_path.unlink(missing_ok=True)
+            continue
+
+        matched_patch = session.get(ScoutImagePatch, matches[0].patch_id)
+        if matched_patch is None:
+            output_path.unlink(missing_ok=True)
+            continue
+        error_meters = haversine_meters(
+            patch.center_lat,
+            patch.center_lon,
+            matched_patch.center_lat,
+            matched_patch.center_lon,
+        )
+        if error_meters > MAX_VALIDATION_ERROR_METERS:
+            output_path.unlink(missing_ok=True)
+            continue
 
         center_x = crop_x + crop_size / 2
         center_y = crop_y + crop_size / 2

@@ -141,14 +141,19 @@ Planned orchestration pattern:
 
 ## Data Sources
 
-The current SF seed uses USGS NAIP Plus imagery. Additional candidate sources
-for future ingestion adapters include:
+The current SF seed uses SF-only imagery from multiple public services:
 
 - USGS NAIP Plus / The National Map imagery services.
-- NOAA aerial and coastal imagery archives.
+- USGS NAIP Plus false-color rendering.
+- NOAA Coastal Imagery RGB 8-bit.
+- Sentinel-2 natural color and color-infrared renderings for lower-resolution
+  satellite context.
+
+Additional candidate sources for future ingestion adapters include:
+
 - OpenAerialMap, where suitable openly licensed imagery exists.
 - DataSF and San Francisco GIS imagery resources.
-- Sentinel-2 or Landsat for low-resolution context and high-altitude tests.
+- Landsat for low-resolution context and high-altitude tests.
 - Future drone-collected Scout imagery with known pose or reviewed ground truth.
 
 ## Local Development
@@ -195,6 +200,14 @@ altitude scales and creates holdout examples:
 docker compose exec backend python -m app.scout.seed_sf --clear --profile expanded --examples 10
 ```
 
+The diverse profile indexes multiple sources and SF scale levels. It stores the
+canonical 512-dimensional CLIP image vectors in Postgres/pgvector and mirrors
+them into Redis Stack for fast similarity search:
+
+```bash
+docker compose exec backend python -m app.scout.seed_sf --clear --profile diverse --image-size 768 --examples 20
+```
+
 ## Weave Tracing
 
 Weave is enabled by default:
@@ -212,10 +225,15 @@ docker compose up -d --build backend
 
 Scout traces cover embedding, indexing, import, and image search operations.
 
-## Redis
+## Vector Storage
 
-Redis Stack is used for vector search. The local Docker override maps Redis to
-host port `6380` to avoid conflicts with any Redis already running on `6379`.
+Image embeddings use `openai/clip-vit-base-patch32` and are L2-normalized
+512-dimensional vectors. Postgres/pgvector is the durable store, while Redis
+Stack is the fast vector-search index rebuilt from Postgres if Redis is empty or
+restarted.
+
+The local Docker override maps Redis to host port `6380` to avoid conflicts with
+any Redis already running on `6379`.
 
 ```text
 redis://localhost:6380/0
@@ -239,12 +257,13 @@ docker compose up -d --build backend frontend
 
 ## Roadmap
 
-- Replace the MVP descriptor with a stronger aerial/geospatial embedding model.
+- Evaluate aerial-specialized embedding models against the current CLIP
+  baseline.
 - Add dedicated model services for object detection and segmentation.
 - Add an evaluation harness with known-location query sets and localization
   error metrics.
 - Add agent run tables, agent outputs, confidence policies, and review queues.
-- Add imagery source adapters beyond USGS NAIP Plus.
+- Add more imagery source adapters beyond the current ArcGIS ImageServer feeds.
 - Add map visualization, geofences, mission timeline views, and operator review
   workflows.
 - Add authority notification integrations behind explicit policy and human
