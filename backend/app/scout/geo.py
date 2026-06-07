@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 
 
@@ -25,3 +26,18 @@ def pixel_to_lon(bounds: GeoBounds, x: float, image_width: int) -> float:
 
 def pixel_to_lat(bounds: GeoBounds, y: float, image_height: int) -> float:
     return bounds.north - (y / image_height) * (bounds.north - bounds.south)
+
+
+def haversine_meters(
+    lat_a: float, lon_a: float, lat_b: float, lon_b: float
+) -> float:
+    radius_meters = 6_371_000.0
+    phi_a = math.radians(lat_a)
+    phi_b = math.radians(lat_b)
+    delta_phi = math.radians(lat_b - lat_a)
+    delta_lambda = math.radians(lon_b - lon_a)
+    value = (
+        math.sin(delta_phi / 2) ** 2
+        + math.cos(phi_a) * math.cos(phi_b) * math.sin(delta_lambda / 2) ** 2
+    )
+    return 2 * radius_meters * math.atan2(math.sqrt(value), math.sqrt(1 - value))

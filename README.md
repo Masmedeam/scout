@@ -208,6 +208,30 @@ them into Redis Stack for fast similarity search:
 docker compose exec backend python -m app.scout.seed_sf --clear --profile diverse --image-size 768 --examples 20
 ```
 
+The full profile tiles all of San Francisco with overlapping NAIP chips for
+city-wide drone VPS coverage (~5k patches at 2048px):
+
+```bash
+docker compose exec backend python -m app.scout.seed_sf \
+  --clear --profile full --sources usgs-naip-plus \
+  --image-size 2048 --examples 20
+```
+
+## Live Drone Video
+
+Upload drone footage from the dashboard **Live** tab or via API:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/scout/live/session \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "video=@flight.mp4" \
+  -F "altitude_m=120" \
+  -F "fps=2"
+```
+
+Scout extracts frames with ffmpeg, localizes periodic VPS fixes against the SF
+index, and fuses optical-flow motion between corrections into a GeoJSON track.
+
 ## Weave Tracing
 
 Weave is enabled by default:

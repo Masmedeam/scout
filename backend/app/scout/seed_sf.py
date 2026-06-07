@@ -1,5 +1,7 @@
 import argparse
+import gc
 import logging
+import time
 from io import BytesIO
 from pathlib import Path
 from typing import NamedTuple
@@ -10,7 +12,11 @@ from sqlmodel import Session, select
 
 from app.core.db import engine
 from app.models import ScoutImagePatch, ScoutLocation, ScoutRasterAsset
-from app.scout.embedding import MODEL_NAME, embed_image
+from app.scout.embedding import (
+    active_embedding_model,
+    clear_embedding_cache,
+    embed_images,
+)
 from app.scout.geo import GeoBounds
 from app.scout.postgres_vector_store import store_patch_embedding
 from app.scout.query_examples import create_query_examples
@@ -107,6 +113,11 @@ SCALE_LEVELS = [
 
 SF_BOUNDS = GeoBounds(-122.515, 37.703, -122.355, 37.835)
 
+FULL_CHIP_LON_SPAN = 0.024
+FULL_CHIP_LAT_SPAN = 0.018
+FULL_GRID_LON_STEP = 0.016
+FULL_GRID_LAT_STEP = 0.012
+
 IMAGERY_SOURCES = {
     "usgs-naip-plus": ArcgisImageSource(
         slug="usgs-naip-plus",
@@ -174,11 +185,16 @@ def main() -> None:
         if args.chips is not None:
             chips = chips[: args.chips]
 
+        total_chip_jobs = len(sources) * len(chips)
+        chip_job_index = 0
+        seed_started = time.monotonic()
+
         for source in sources:
             source_dir = dirs["rasters"] / source.slug
             source_dir.mkdir(parents=True, exist_ok=True)
 
             for chip in chips:
+                chip_job_index += 1
                 destination = source_dir / raster_filename(source=source, chip=chip)
                 if not args.reindex_existing and raster_asset_exists(
                     session=session, path=destination
@@ -224,33 +240,46 @@ def main() -> None:
                 session.commit()
                 session.refresh(asset)
 
+                patches: list[ScoutImagePatch] = []
                 for payload in patch_payloads:
                     patch = ScoutImagePatch(
                         raster_asset_id=asset.id,
-                        embedding_model=MODEL_NAME,
+                        embedding_model=active_embedding_model(),
                         embedding_dim=store.dim,
                         redis_key="",
                         **payload,
                     )
                     session.add(patch)
                     session.flush()
-                    embedding = embed_image(patch.file_path)
-                    store_patch_embedding(patch, embedding)
-                    patch.redis_key = store.upsert_patch(
-                        patch_id=patch.id,
-                        location_id=location.id,
-                        center_lat=patch.center_lat,
-                        center_lon=patch.center_lon,
-                        embedding=embedding,
-                    )
-                    total_indexed += int(store.available)
+                    patches.append(patch)
+
+                for batch_start in range(0, len(patches), args.embed_batch_size):
+                    batch = patches[batch_start : batch_start + args.embed_batch_size]
+                    embeddings = embed_images([patch.file_path for patch in batch])
+                    for patch, embedding in zip(batch, embeddings, strict=True):
+                        store_patch_embedding(patch, embedding)
+                        patch.redis_key = store.upsert_patch(
+                            patch_id=patch.id,
+                            location_id=location.id,
+                            center_lat=patch.center_lat,
+                            center_lon=patch.center_lon,
+                            embedding=embedding,
+                        )
+                        total_indexed += int(store.available)
 
                 session.commit()
                 total_patches += len(patch_payloads)
+                elapsed = time.monotonic() - seed_started
+                rate = chip_job_index / elapsed if elapsed > 0 else 0.0
+                remaining = total_chip_jobs - chip_job_index
+                eta_min = (remaining / rate / 60) if rate > 0 else 0.0
                 logger.info(
-                    f"Indexed {source.slug}/{chip.name}: {len(patch_payloads)} "
-                    f"patches from {width}x{height} imagery"
+                    f"[{chip_job_index}/{total_chip_jobs}] Indexed "
+                    f"{source.slug}/{chip.name}: {len(patch_payloads)} patches "
+                    f"from {width}x{height} imagery (~{eta_min:.0f}m remaining)"
                 )
+                gc.collect()
+                clear_embedding_cache()
 
     logger.info(
         f"SF seed complete: {len(sources)} sources, {len(chips)} chips, "
@@ -282,7 +311,7 @@ def build_sources(sources_arg: str | None, profile: str) -> list[ArcgisImageSour
     if sources_arg is None:
         source_slugs = (
             ["usgs-naip-plus"]
-            if profile != "diverse"
+            if profile in {"full", "expanded", "quick"}
             else [
                 "usgs-naip-plus",
                 "usgs-naip-plus-false-color",
@@ -309,7 +338,9 @@ def build_sources(sources_arg: str | None, profile: str) -> list[ArcgisImageSour
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Seed Scout with SF aerial imagery.")
     parser.add_argument(
-        "--profile", choices=("quick", "expanded", "diverse"), default="expanded"
+        "--profile",
+        choices=("quick", "expanded", "diverse", "full"),
+        default="expanded",
     )
     parser.add_argument(
         "--sources",
@@ -325,6 +356,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-size", type=int, default=1024)
     parser.add_argument("--patch-size", type=int, default=256)
     parser.add_argument("--overlap", type=int, default=64)
+    parser.add_argument("--embed-batch-size", type=int, default=8)
     parser.add_argument("--examples", type=int, default=10)
     parser.add_argument("--clear", action="store_true")
     parser.add_argument("--force-download", action="store_true")
@@ -341,6 +373,8 @@ def build_chips(profile: str) -> list[SfChip]:
         return SF_QUICK_CHIPS
     if profile == "diverse":
         return build_diverse_chips()
+    if profile == "full":
+        return build_full_chips()
     return [
         SfChip(
             name=f"{area.name}-{scale_name}",
@@ -376,6 +410,27 @@ def build_diverse_chips() -> list[SfChip]:
         for row, lat in enumerate(lat_steps, start=1)
         for col, lon in enumerate(lon_steps, start=1)
     )
+    return chips
+
+
+def build_full_chips() -> list[SfChip]:
+    chips: list[SfChip] = []
+    lat = SF_BOUNDS.south + FULL_CHIP_LAT_SPAN / 2
+    row = 1
+    while lat <= SF_BOUNDS.north - FULL_CHIP_LAT_SPAN / 2 + 1e-9:
+        lon = SF_BOUNDS.west + FULL_CHIP_LON_SPAN / 2
+        col = 1
+        while lon <= SF_BOUNDS.east - FULL_CHIP_LON_SPAN / 2 + 1e-9:
+            chips.append(
+                SfChip(
+                    name=f"full-{row}-{col}",
+                    bounds=bounded_chip(lon, lat, FULL_CHIP_LON_SPAN, FULL_CHIP_LAT_SPAN),
+                )
+            )
+            lon += FULL_GRID_LON_STEP
+            col += 1
+        lat += FULL_GRID_LAT_STEP
+        row += 1
     return chips
 
 

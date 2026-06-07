@@ -231,6 +231,29 @@ class ScoutSearchMatch(SQLModel):
     north: float
     file_path: str
     preview_url: str | None = None
+    retrieval_score: float | None = None
+    fine_match_score: float | None = None
+    fine_match_inliers: int | None = None
+    refined_lat: float | None = None
+    refined_lon: float | None = None
+
+
+class ScoutFusionStatePublic(SQLModel):
+    session_id: str
+    lat: float
+    lon: float
+    source: str
+    vps_confidence: float
+    timestamp: float
+
+
+class ScoutFlightEvalPublic(SQLModel):
+    frames_evaluated: int
+    median_error_meters: float | None = None
+    mean_error_meters: float | None = None
+    max_error_meters: float | None = None
+    within_50m: int | None = None
+    within_250m: int | None = None
 
 
 class ScoutSearchRun(SQLModel, table=True):
@@ -253,6 +276,8 @@ class ScoutSearchRunPublic(SQLModel):
     top_k: int
     predicted_lat: float | None = None
     predicted_lon: float | None = None
+    confidence: float | None = None
+    method: str | None = None
     matches: list[ScoutSearchMatch]
 
 
@@ -265,6 +290,55 @@ class ScoutIndexStatus(SQLModel):
     redis_index: str
     embedding_model: str
     embedding_dim: int
+
+
+class ScoutCoverageCellPublic(SQLModel):
+    row: int
+    col: int
+    west: float
+    south: float
+    east: float
+    north: float
+    covered: bool
+
+
+class ScoutCoveragePublic(SQLModel):
+    coverage_percent: float
+    patch_count: int
+    raster_asset_count: int
+    bounds_west: float
+    bounds_south: float
+    bounds_east: float
+    bounds_north: float
+    uncovered_cell_count: int
+
+
+class ScoutLiveTrackPoint(SQLModel):
+    frame_id: str
+    lat: float
+    lon: float
+    source: str
+    vps_confidence: float
+    timestamp_s: float
+
+
+class ScoutLiveSessionPublic(SQLModel):
+    session_id: str
+    status: str
+    frame_count: int
+    vps_fix_count: int
+    median_confidence: float
+    track: list[ScoutLiveTrackPoint]
+    error: str | None = None
+
+
+class ScoutLiveSessionSummary(SQLModel):
+    session_id: str
+    status: str
+    frame_count: int
+    vps_fix_count: int
+    median_confidence: float
+    track_length_m: float | None = None
 
 
 class ScoutImportResult(SQLModel):

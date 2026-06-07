@@ -1,3 +1,4 @@
+import json
 import uuid
 from pathlib import Path
 from typing import Annotated, Any
@@ -10,10 +11,16 @@ from starlette.responses import FileResponse
 from app.api.deps import CurrentUser, SessionDep
 from app.core.config import settings
 from app.models import (
+    ScoutCoveragePublic,
     ScoutExampleImage,
+    ScoutFlightEvalPublic,
+    ScoutFusionStatePublic,
     ScoutImagePatch,
     ScoutImportResult,
     ScoutIndexStatus,
+    ScoutLiveSessionPublic,
+    ScoutLiveSessionSummary,
+    ScoutLiveTrackPoint,
     ScoutLocation,
     ScoutLocationCreate,
     ScoutLocationPublic,
@@ -24,18 +31,26 @@ from app.models import (
     ScoutSearchRun,
     ScoutSearchRunPublic,
 )
-from app.scout.embedding import MODEL_NAME, embed_image
-from app.scout.geo import GeoBounds
+from app.scout.coverage import compute_coverage
+from app.scout.embedding import active_embedding_model, embed_image
+from app.scout.flight_log import evaluate_flight_log, load_manifest, summarize_results
+from app.scout.geo import GeoBounds, haversine_meters
+from app.scout.live_session import (
+    LiveSessionResult,
+    LiveTrackPoint,
+    get_live_session,
+    process_live_video,
+)
+from app.scout.localization import localize_image
 from app.scout.postgres_vector_store import (
     count_postgres_embeddings,
-    rebuild_redis_from_postgres,
-    search_patch_embeddings,
     store_patch_embedding,
 )
 from app.scout.query_examples import get_query_example_path, read_query_examples
-from app.scout.storage import save_upload
+from app.scout.storage import ensure_storage_dirs, save_upload
 from app.scout.tiling import tile_raster
 from app.scout.vector_store import ScoutVectorStore
+from app.scout.vio_fusion import VioDelta, VpsFix, get_tracker
 
 router = APIRouter(prefix="/scout", tags=["scout"])
 
@@ -88,8 +103,23 @@ def read_index_status(session: SessionDep, _current_user: CurrentUser) -> Any:
         postgres_vectors=count_postgres_embeddings(session),
         redis_available=store.available,
         redis_index=store.index_name,
-        embedding_model=MODEL_NAME,
+        embedding_model=active_embedding_model(),
         embedding_dim=store.dim,
+    )
+
+
+@router.get("/index/coverage", response_model=ScoutCoveragePublic)
+def read_index_coverage(session: SessionDep, _current_user: CurrentUser) -> Any:
+    report = compute_coverage(session)
+    return ScoutCoveragePublic(
+        coverage_percent=report.coverage_percent,
+        patch_count=report.patch_count,
+        raster_asset_count=report.raster_asset_count,
+        bounds_west=report.bounds_west,
+        bounds_south=report.bounds_south,
+        bounds_east=report.bounds_east,
+        bounds_north=report.bounds_north,
+        uncovered_cell_count=len(report.uncovered_cells),
     )
 
 
@@ -224,7 +254,7 @@ def import_imagery(
     for payload in patch_payloads:
         patch = ScoutImagePatch(
             raster_asset_id=asset.id,
-            embedding_model=MODEL_NAME,
+            embedding_model=active_embedding_model(),
             embedding_dim=store.dim,
             redis_key="",
             **payload,
@@ -269,43 +299,38 @@ def search_image(
     query_path = save_upload(image, "queries")
     try:
         _assert_readable_image(query_path)
-        embedding = embed_image(query_path)
+        localization = localize_image(session=session, query_path=query_path, top_k=top_k)
     except (UnidentifiedImageError, OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    store = ScoutVectorStore()
-    vector_matches = store.search(embedding, top_k=top_k)
-    if not vector_matches:
-        vector_matches = search_patch_embeddings(session, embedding, top_k=top_k)
-        if vector_matches and store.available:
-            rebuild_redis_from_postgres(session, store, clear=True)
     matches: list[ScoutSearchMatch] = []
-    for vector_match in vector_matches:
-        patch = session.get(ScoutImagePatch, vector_match.patch_id)
-        if patch is None:
-            continue
+    for localized in localization.matches:
+        fine = localized.fine_match
         matches.append(
             ScoutSearchMatch(
-                patch_id=patch.id,
-                score=vector_match.score,
-                center_lat=patch.center_lat,
-                center_lon=patch.center_lon,
-                west=patch.west,
-                south=patch.south,
-                east=patch.east,
-                north=patch.north,
-                file_path=patch.file_path,
-                preview_url=_patch_preview_url(patch.id),
+                patch_id=localized.patch_id,
+                score=localized.combined_score,
+                center_lat=localized.center_lat,
+                center_lon=localized.center_lon,
+                west=localized.west,
+                south=localized.south,
+                east=localized.east,
+                north=localized.north,
+                file_path=localized.file_path,
+                preview_url=_patch_preview_url(localized.patch_id),
+                retrieval_score=localized.retrieval_score,
+                fine_match_score=fine.match_score if fine else None,
+                fine_match_inliers=fine.inlier_count if fine else None,
+                refined_lat=fine.refined_lat if fine else None,
+                refined_lon=fine.refined_lon if fine else None,
             )
         )
 
-    predicted_lat = matches[0].center_lat if matches else None
-    predicted_lon = matches[0].center_lon if matches else None
     run = ScoutSearchRun(
         query_image_path=str(query_path),
         top_k=top_k,
-        predicted_lat=predicted_lat,
-        predicted_lon=predicted_lon,
+        predicted_lat=localization.predicted_lat,
+        predicted_lon=localization.predicted_lon,
         matches=[match.model_dump(mode="json") for match in matches],
     )
     session.add(run)
@@ -318,7 +343,196 @@ def search_image(
         top_k=run.top_k,
         predicted_lat=run.predicted_lat,
         predicted_lon=run.predicted_lon,
+        confidence=localization.confidence,
+        method=localization.method,
         matches=matches,
+    )
+
+
+@router.post("/fusion/init", response_model=ScoutFusionStatePublic)
+def init_fusion(
+    *,
+    _current_user: CurrentUser,
+    session_id: Annotated[str, Form()],
+    lat: Annotated[float, Form()],
+    lon: Annotated[float, Form()],
+) -> Any:
+    state = get_tracker(session_id).initialize(lat=lat, lon=lon)
+    return ScoutFusionStatePublic(
+        session_id=session_id,
+        lat=state.lat,
+        lon=state.lon,
+        source=state.source,
+        vps_confidence=state.vps_confidence,
+        timestamp=state.timestamp,
+    )
+
+
+@router.post("/fusion/vio", response_model=ScoutFusionStatePublic)
+def fusion_vio_update(
+    *,
+    _current_user: CurrentUser,
+    session_id: Annotated[str, Form()],
+    delta_north_m: Annotated[float, Form()],
+    delta_east_m: Annotated[float, Form()],
+) -> Any:
+    tracker = get_tracker(session_id)
+    try:
+        state = tracker.apply_vio(
+            VioDelta(delta_north_m=delta_north_m, delta_east_m=delta_east_m)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return ScoutFusionStatePublic(
+        session_id=session_id,
+        lat=state.lat,
+        lon=state.lon,
+        source=state.source,
+        vps_confidence=state.vps_confidence,
+        timestamp=state.timestamp,
+    )
+
+
+@router.post("/fusion/vps", response_model=ScoutFusionStatePublic)
+def fusion_vps_update(
+    *,
+    session: SessionDep,
+    _current_user: CurrentUser,
+    session_id: Annotated[str, Form()],
+    image: Annotated[UploadFile | None, File()] = None,
+    lat: Annotated[float | None, Form()] = None,
+    lon: Annotated[float | None, Form()] = None,
+    confidence: Annotated[float, Form()] = 0.8,
+) -> Any:
+    fix_lat = lat
+    fix_lon = lon
+    fix_confidence = confidence
+
+    if image is not None:
+        query_path = save_upload(image, "queries")
+        try:
+            _assert_readable_image(query_path)
+            localization = localize_image(session=session, query_path=query_path, top_k=3)
+        except (UnidentifiedImageError, OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if localization.predicted_lat is None or localization.predicted_lon is None:
+            raise HTTPException(status_code=422, detail="VPS could not localize query image")
+        fix_lat = localization.predicted_lat
+        fix_lon = localization.predicted_lon
+        fix_confidence = localization.confidence
+
+    if fix_lat is None or fix_lon is None:
+        raise HTTPException(status_code=400, detail="Provide lat/lon or an image for VPS fix")
+
+    tracker = get_tracker(session_id)
+    try:
+        state = tracker.apply_vps(
+            VpsFix(lat=fix_lat, lon=fix_lon, confidence=fix_confidence)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return ScoutFusionStatePublic(
+        session_id=session_id,
+        lat=state.lat,
+        lon=state.lon,
+        source=state.source,
+        vps_confidence=state.vps_confidence,
+        timestamp=state.timestamp,
+    )
+
+
+@router.get("/fusion/{session_id}", response_model=ScoutFusionStatePublic)
+def read_fusion_state(
+    *, _current_user: CurrentUser, session_id: str
+) -> Any:
+    tracker = get_tracker(session_id)
+    if tracker.state is None:
+        raise HTTPException(status_code=404, detail="Fusion session not initialized")
+    state = tracker.state
+    return ScoutFusionStatePublic(
+        session_id=session_id,
+        lat=state.lat,
+        lon=state.lon,
+        source=state.source,
+        vps_confidence=state.vps_confidence,
+        timestamp=state.timestamp,
+    )
+
+
+@router.post("/live/session", response_model=ScoutLiveSessionPublic)
+def create_live_session(
+    *,
+    session: SessionDep,
+    _current_user: CurrentUser,
+    video: Annotated[UploadFile, File()],
+    altitude_m: Annotated[float, Form()] = settings.SCOUT_VO_DEFAULT_ALTITUDE_M,
+    fps: Annotated[float, Form()] = settings.SCOUT_LIVE_FRAME_FPS,
+) -> Any:
+    if fps <= 0 or fps > 10:
+        raise HTTPException(status_code=400, detail="fps must be between 0 and 10")
+    if altitude_m <= 0 or altitude_m > 500:
+        raise HTTPException(status_code=400, detail="altitude_m must be between 0 and 500")
+
+    video_path = save_upload(video, "queries/live-uploads")
+    result = process_live_video(
+        session=session,
+        video_path=video_path,
+        altitude_m=altitude_m,
+        fps=fps,
+    )
+    return _live_session_public(result)
+
+
+@router.get("/live/{session_id}", response_model=ScoutLiveSessionPublic)
+def read_live_session(*, _current_user: CurrentUser, session_id: str) -> Any:
+    result = get_live_session(session_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Live session not found")
+    return _live_session_public(result)
+
+
+@router.get("/live/{session_id}/summary", response_model=ScoutLiveSessionSummary)
+def read_live_session_summary(*, _current_user: CurrentUser, session_id: str) -> Any:
+    result = get_live_session(session_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Live session not found")
+    return ScoutLiveSessionSummary(
+        session_id=result.session_id,
+        status=result.status,
+        frame_count=result.frame_count,
+        vps_fix_count=result.vps_fix_count,
+        median_confidence=result.median_confidence,
+        track_length_m=_track_length_meters(result.track),
+    )
+
+
+@router.post("/flight-log/eval", response_model=ScoutFlightEvalPublic)
+def eval_flight_log(
+    *,
+    session: SessionDep,
+    _current_user: CurrentUser,
+    manifest: Annotated[UploadFile, File()],
+    top_k: Annotated[int, Form()] = 5,
+) -> Any:
+    if top_k < 1 or top_k > 50:
+        raise HTTPException(status_code=400, detail="top_k must be between 1 and 50")
+
+    eval_dir = ensure_storage_dirs()["queries"] / "flight-log"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = eval_dir / manifest.filename
+    manifest_path.write_bytes(manifest.file.read())
+    frames = load_manifest(manifest_path)
+    results = evaluate_flight_log(session=session, frames=frames, top_k=top_k)
+    summary = summarize_results(results)
+    report_path = eval_dir / "eval_report.json"
+    report_path.write_text(json.dumps(summary, indent=2))
+    return ScoutFlightEvalPublic(
+        frames_evaluated=summary.get("frames_evaluated", 0),
+        median_error_meters=summary.get("median_error_meters"),
+        mean_error_meters=summary.get("mean_error_meters"),
+        max_error_meters=summary.get("max_error_meters"),
+        within_50m=summary.get("within_50m"),
+        within_250m=summary.get("within_250m"),
     )
 
 
@@ -376,3 +590,34 @@ def _safe_storage_path(path: str) -> Path:
 def _example_label(patch: ScoutImagePatch) -> str:
     stem = Path(patch.file_path).stem.replace("-", " ").replace("_", " ")
     return stem.title()
+
+
+def _live_session_public(result: LiveSessionResult) -> ScoutLiveSessionPublic:
+    return ScoutLiveSessionPublic(
+        session_id=result.session_id,
+        status=result.status,
+        frame_count=result.frame_count,
+        vps_fix_count=result.vps_fix_count,
+        median_confidence=result.median_confidence,
+        track=[
+            ScoutLiveTrackPoint(
+                frame_id=point.frame_id,
+                lat=point.lat,
+                lon=point.lon,
+                source=point.source,
+                vps_confidence=point.vps_confidence,
+                timestamp_s=point.timestamp_s,
+            )
+            for point in result.track
+        ],
+        error=result.error,
+    )
+
+
+def _track_length_meters(track: list[LiveTrackPoint]) -> float | None:
+    if len(track) < 2:
+        return None
+    total = 0.0
+    for prev, curr in zip(track, track[1:], strict=False):
+        total += haversine_meters(prev.lat, prev.lon, curr.lat, curr.lon)
+    return total

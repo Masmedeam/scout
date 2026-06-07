@@ -57,9 +57,23 @@ class Settings(BaseSettings):
     POSTGRES_DB: str = ""
     REDIS_URL: str = "redis://redis:6379/0"
     SCOUT_STORAGE_DIR: str = "scout-data"
+    SCOUT_EMBEDDING_BACKEND: Literal["clip", "dinov2"] = "clip"
     SCOUT_EMBEDDING_MODEL: str = "openai/clip-vit-base-patch32"
     SCOUT_EMBEDDING_DIM: int = 512
     SCOUT_REDIS_INDEX: str = "scout-patches"
+    SCOUT_FINEMATCH_ENABLED: bool = True
+    SCOUT_RERANK_CANDIDATES: int = 5
+    SCOUT_VPS_MIN_SCORE_GAP: float = 0.015
+    SCOUT_FUSION_VPS_WEIGHT: float = 0.85
+    SCOUT_FUSION_HISTORY_LIMIT: int = 500
+    SCOUT_LIVE_VPS_INTERVAL_FRAMES: int = 5
+    SCOUT_LIVE_VPS_MIN_CONFIDENCE: float = 0.15
+    SCOUT_LIVE_GEO_PRIOR_RADIUS_KM: float = 0.5
+    SCOUT_LIVE_FRAME_FPS: float = 2.0
+    SCOUT_VO_DEFAULT_ALTITUDE_M: float = 120.0
+    SCOUT_VO_CAMERA_FOV_DEG: float = 60.0
+    SCOUT_SLAM_MODEL: Literal["homography", "optical_flow"] = "homography"
+    SCOUT_LIVE_VPS_MIN_APPLY_CONFIDENCE: float = 0.08
     WEAVE_ENABLED: bool = True
     WEAVE_PROJECT: str = "scout"
 

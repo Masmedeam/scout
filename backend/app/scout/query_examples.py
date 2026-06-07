@@ -1,5 +1,4 @@
 import json
-import math
 from pathlib import Path
 
 from PIL import Image, ImageEnhance
@@ -8,7 +7,7 @@ from sqlmodel import Session, select
 from app.core.config import settings
 from app.models import ScoutImagePatch
 from app.scout.embedding import embed_image
-from app.scout.geo import GeoBounds, pixel_to_lat, pixel_to_lon
+from app.scout.geo import GeoBounds, haversine_meters, pixel_to_lat, pixel_to_lon
 from app.scout.postgres_vector_store import search_patch_embeddings
 from app.scout.storage import ensure_storage_dirs
 from app.scout.vector_store import ScoutVectorStore
@@ -140,18 +139,3 @@ def write_transformed_patch_example(
         crop = ImageEnhance.Brightness(crop).enhance(0.97 + 0.02 * (variant_index % 3))
         crop.save(output_path, format="JPEG", quality=92)
     return crop_x, crop_y, crop_size
-
-
-def haversine_meters(
-    lat_a: float, lon_a: float, lat_b: float, lon_b: float
-) -> float:
-    radius_meters = 6_371_000.0
-    phi_a = math.radians(lat_a)
-    phi_b = math.radians(lat_b)
-    delta_phi = math.radians(lat_b - lat_a)
-    delta_lambda = math.radians(lon_b - lon_a)
-    value = (
-        math.sin(delta_phi / 2) ** 2
-        + math.cos(phi_a) * math.cos(phi_b) * math.sin(delta_lambda / 2) ** 2
-    )
-    return 2 * radius_meters * math.atan2(math.sqrt(value), math.sqrt(1 - value))

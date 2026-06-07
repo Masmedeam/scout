@@ -26,6 +26,8 @@ dependencies = [
     "transformers>=4.53,<5.0",
     "torch>=2.6,<3.0",
     "pgvector>=0.3,<1.0",
+    "opencv-python-headless>=4.10,<5.0",
+    "huggingface-hub>=0.26.0,<1.0.0",
 ]
 
 [dependency-groups]

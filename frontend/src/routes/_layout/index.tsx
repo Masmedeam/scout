@@ -8,6 +8,7 @@ import {
   Radar,
   Search,
   Upload,
+  Video,
 } from "lucide-react"
 import { type FormEvent, useEffect, useState } from "react"
 
@@ -64,11 +65,18 @@ type SearchMatch = {
   north: number
   file_path: string
   preview_url: string | null
+  retrieval_score?: number | null
+  fine_match_score?: number | null
+  fine_match_inliers?: number | null
+  refined_lat?: number | null
+  refined_lon?: number | null
 }
 
 type SearchResult = {
   predicted_lat: number | null
   predicted_lon: number | null
+  confidence?: number | null
+  method?: string | null
   matches: SearchMatch[]
 }
 
@@ -80,12 +88,41 @@ type ExampleImage = {
   preview_url: string
 }
 
+type ScoutCoverage = {
+  coverage_percent: number
+  patch_count: number
+  raster_asset_count: number
+  uncovered_cell_count: number
+}
+
+type LiveTrackPoint = {
+  frame_id: string
+  lat: number
+  lon: number
+  source: string
+  vps_confidence: number
+  timestamp_s: number
+}
+
+type LiveSessionResult = {
+  session_id: string
+  status: string
+  frame_count: number
+  vps_fix_count: number
+  median_confidence: number
+  track: LiveTrackPoint[]
+  error?: string | null
+}
+
 function Dashboard() {
   const queryClient = useQueryClient()
   const [importFile, setImportFile] = useState<File | null>(null)
   const [queryFile, setQueryFile] = useState<File | null>(null)
+  const [videoFile, setVideoFile] = useState<File | null>(null)
+  const [altitudeM, setAltitudeM] = useState("120")
   const [importResult, setImportResult] = useState<ImportResult | null>(null)
   const [searchResult, setSearchResult] = useState<SearchResult | null>(null)
+  const [liveResult, setLiveResult] = useState<LiveSessionResult | null>(null)
   const [form, setForm] = useState({
     location_name: "San Francisco",
     west: "-122.515",
@@ -101,6 +138,11 @@ function Dashboard() {
   const statusQuery = useQuery({
     queryKey: ["scout-status"],
     queryFn: () => scoutJson<ScoutStatus>("/api/v1/scout/index/status"),
+  })
+
+  const coverageQuery = useQuery({
+    queryKey: ["scout-coverage"],
+    queryFn: () => scoutJson<ScoutCoverage>("/api/v1/scout/index/coverage"),
   })
 
   const examplesQuery = useQuery({
@@ -146,6 +188,23 @@ function Dashboard() {
     onSuccess: setSearchResult,
   })
 
+  const liveMutation = useMutation({
+    mutationFn: async () => {
+      if (!videoFile) {
+        throw new Error("Choose a drone video first.")
+      }
+      const payload = new FormData()
+      payload.append("video", videoFile)
+      payload.append("altitude_m", altitudeM)
+      payload.append("fps", "2")
+      return scoutJson<LiveSessionResult>("/api/v1/scout/live/session", {
+        method: "POST",
+        body: payload,
+      })
+    },
+    onSuccess: setLiveResult,
+  })
+
   const handleImport = (event: FormEvent) => {
     event.preventDefault()
     importMutation.mutate()
@@ -154,6 +213,42 @@ function Dashboard() {
   const handleSearch = (event: FormEvent) => {
     event.preventDefault()
     searchMutation.mutate(undefined)
+  }
+
+  const handleLive = (event: FormEvent) => {
+    event.preventDefault()
+    liveMutation.mutate()
+  }
+
+  const downloadGeoJson = () => {
+    if (!liveResult?.track.length) {
+      return
+    }
+    const featureCollection = {
+      type: "FeatureCollection",
+      features: liveResult.track.map((point) => ({
+        type: "Feature",
+        geometry: {
+          type: "Point",
+          coordinates: [point.lon, point.lat],
+        },
+        properties: {
+          frame_id: point.frame_id,
+          source: point.source,
+          vps_confidence: point.vps_confidence,
+          timestamp_s: point.timestamp_s,
+        },
+      })),
+    }
+    const blob = new Blob([JSON.stringify(featureCollection, null, 2)], {
+      type: "application/geo+json",
+    })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement("a")
+    anchor.href = url
+    anchor.download = `scout-track-${liveResult.session_id}.geojson`
+    anchor.click()
+    URL.revokeObjectURL(url)
   }
 
   const handleExampleSearch = async (example: ExampleImage) => {
@@ -181,7 +276,7 @@ function Dashboard() {
         </Badge>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-5">
         <MetricCard
           icon={MapPin}
           label="Locations"
@@ -202,6 +297,11 @@ function Dashboard() {
           label="Embedding Dim"
           value={statusQuery.data?.embedding_dim ?? 256}
         />
+        <MetricCard
+          icon={Radar}
+          label="SF Coverage"
+          value={`${(coverageQuery.data?.coverage_percent ?? 0).toFixed(0)}%`}
+        />
       </div>
 
       <Tabs defaultValue="dataset" className="space-y-4">
@@ -213,6 +313,10 @@ function Dashboard() {
           <TabsTrigger value="search">
             <Search />
             Search
+          </TabsTrigger>
+          <TabsTrigger value="live">
+            <Video />
+            Live
           </TabsTrigger>
         </TabsList>
 
@@ -417,11 +521,17 @@ function Dashboard() {
                     <div className="rounded-md border p-4">
                       <p className="text-sm text-muted-foreground">
                         Estimated position
+                        {searchResult.method ? ` (${searchResult.method})` : ""}
                       </p>
                       <p className="text-xl font-semibold">
                         {searchResult.predicted_lat?.toFixed(6)},{" "}
                         {searchResult.predicted_lon?.toFixed(6)}
                       </p>
+                      {searchResult.confidence != null ? (
+                        <p className="text-sm text-muted-foreground">
+                          Confidence {(searchResult.confidence * 100).toFixed(0)}%
+                        </p>
+                      ) : null}
                       {searchResult.matches[0]?.preview_url ? (
                         <AuthImage
                           alt="Best matched location preview"
@@ -450,9 +560,14 @@ function Dashboard() {
                           </Badge>
                           <div>
                             <p className="font-medium">
-                              {match.center_lat.toFixed(6)},{" "}
-                              {match.center_lon.toFixed(6)}
+                              {(match.refined_lat ?? match.center_lat).toFixed(6)},{" "}
+                              {(match.refined_lon ?? match.center_lon).toFixed(6)}
                             </p>
+                            {match.fine_match_inliers != null ? (
+                              <p className="text-xs text-muted-foreground">
+                                Fine match inliers {match.fine_match_inliers}
+                              </p>
+                            ) : null}
                             <p className="text-xs text-muted-foreground">
                               Bounds {match.west.toFixed(5)},{" "}
                               {match.south.toFixed(5)} to{" "}
@@ -469,6 +584,116 @@ function Dashboard() {
                 ) : (
                   <div className="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">
                     Search results will appear here after the first query.
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="live">
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,420px)_1fr]">
+            <Card>
+              <CardHeader>
+                <CardTitle>Live Drone Track</CardTitle>
+                <CardDescription>
+                  Upload drone footage. Scout extracts frames, runs VPS fixes,
+                  and fuses optical-flow motion between corrections.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <form className="grid gap-4" onSubmit={handleLive}>
+                  <div className="grid gap-2">
+                    <Label htmlFor="drone-video">Drone video</Label>
+                    <Input
+                      id="drone-video"
+                      type="file"
+                      accept="video/*"
+                      onChange={(event) =>
+                        setVideoFile(event.target.files?.[0] ?? null)
+                      }
+                    />
+                  </div>
+                  <Field
+                    label="Altitude (m AGL)"
+                    value={altitudeM}
+                    onChange={setAltitudeM}
+                  />
+                  <Button type="submit" disabled={liveMutation.isPending}>
+                    <Video />
+                    {liveMutation.isPending ? "Processing..." : "Process Video"}
+                  </Button>
+                  {liveMutation.error ? (
+                    <p className="text-sm text-destructive">
+                      {liveMutation.error.message}
+                    </p>
+                  ) : null}
+                </form>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Track Output</CardTitle>
+                <CardDescription>
+                  Fused lat/lon per extracted frame with VPS confidence.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {liveResult?.track.length ? (
+                  <div className="space-y-4">
+                    <div className="rounded-md border p-4">
+                      <p className="text-sm text-muted-foreground">
+                        Session {liveResult.session_id.slice(0, 8)} ·{" "}
+                        {liveResult.status}
+                      </p>
+                      <p className="text-sm">
+                        {liveResult.frame_count} frames ·{" "}
+                        {liveResult.vps_fix_count} VPS fixes · median conf{" "}
+                        {(liveResult.median_confidence * 100).toFixed(0)}%
+                      </p>
+                      <Button
+                        className="mt-3"
+                        type="button"
+                        variant="outline"
+                        onClick={downloadGeoJson}
+                      >
+                        Export GeoJSON
+                      </Button>
+                    </div>
+                    <div className="max-h-[480px] space-y-2 overflow-y-auto">
+                      {liveResult.track.map((point) => (
+                        <div
+                          className="grid gap-2 rounded-md border p-3 md:grid-cols-[1fr_auto]"
+                          key={point.frame_id}
+                        >
+                          <div>
+                            <p className="font-medium">{point.frame_id}</p>
+                            <p className="text-sm">
+                              {point.lat.toFixed(6)}, {point.lon.toFixed(6)}
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              {point.source} · conf{" "}
+                              {(point.vps_confidence * 100).toFixed(0)}% · t=
+                              {point.timestamp_s.toFixed(1)}s
+                            </p>
+                          </div>
+                          <a
+                            className="text-sm text-primary underline"
+                            href={`https://www.google.com/maps?q=${point.lat},${point.lon}`}
+                            rel="noreferrer"
+                            target="_blank"
+                          >
+                            Map
+                          </a>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">
+                    {liveResult?.error ??
+                      "Upload a drone clip to generate a geolocated track."}
                   </div>
                 )}
               </CardContent>
@@ -523,7 +748,7 @@ function MetricCard({
 }: {
   icon: typeof Database
   label: string
-  value: number
+  value: number | string
 }) {
   return (
     <Card className="gap-3 py-4">
