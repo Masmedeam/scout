@@ -1,7 +1,10 @@
+import base64
+import json
 import uuid
 from pathlib import Path
 from typing import Annotated, Any
 
+import httpx
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from PIL import Image, UnidentifiedImageError
 from sqlmodel import col, func, select
@@ -38,6 +41,85 @@ from app.scout.tiling import tile_raster
 from app.scout.vector_store import ScoutVectorStore
 
 router = APIRouter(prefix="/scout", tags=["scout"])
+
+SAFETY_CATEGORIES = [
+    "smoke",
+    "visible fire",
+    "person lying on the ground or fallen",
+    "aggressive behavior",
+    "physical fight",
+    "weapon visible",
+    "traffic collision",
+    "pedestrian in roadway danger",
+    "crowd crush or panic",
+    "structural collapse",
+    "flooding",
+    "downed power line",
+    "hazardous spill",
+    "vehicle driving dangerously",
+    "person trapped or stranded",
+    "medical distress",
+    "unattended child in danger",
+    "blocked emergency access",
+    "large debris hazard",
+    "suspicious unattended package",
+]
+
+SAFETY_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "emergency_detected": {"type": "boolean"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "summary": {"type": "string"},
+        "scene_description": {"type": "string"},
+        "detected_issues": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "category": {"type": "string"},
+                    "severity": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "critical"],
+                    },
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "evidence": {"type": "string"},
+                    "recommended_action": {"type": "string"},
+                    "bounding_box": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "x": {"type": "number", "minimum": 0, "maximum": 1},
+                            "y": {"type": "number", "minimum": 0, "maximum": 1},
+                            "width": {"type": "number", "minimum": 0, "maximum": 1},
+                            "height": {"type": "number", "minimum": 0, "maximum": 1},
+                        },
+                        "required": ["x", "y", "width", "height"],
+                    },
+                },
+                "required": [
+                    "category",
+                    "severity",
+                    "confidence",
+                    "evidence",
+                    "recommended_action",
+                    "bounding_box",
+                ],
+            },
+        },
+        "limitations": {"type": "string"},
+    },
+    "required": [
+        "emergency_detected",
+        "confidence",
+        "summary",
+        "scene_description",
+        "detected_issues",
+        "limitations",
+    ],
+}
 
 
 @router.get("/locations", response_model=ScoutLocationsPublic)
@@ -322,6 +404,90 @@ def search_image(
     )
 
 
+@router.post("/analyze/safety")
+def analyze_safety(
+    *,
+    _current_user: CurrentUser,
+    image: Annotated[UploadFile, File()],
+) -> Any:
+    if not settings.OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail="OpenAI API key is not configured")
+
+    query_path = save_upload(image, "queries")
+    try:
+        _assert_readable_image(query_path)
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    image_data = base64.b64encode(Path(query_path).read_bytes()).decode("ascii")
+    prompt = (
+        "Analyze this single drone livestream frame for public-safety concerns. "
+        "Check these 20 categories: "
+        f"{', '.join(SAFETY_CATEGORIES)}. "
+        "Return emergency_detected=true only when visible evidence suggests an "
+        "active or likely urgent safety issue. Do not infer emergency from normal "
+        "traffic, normal crowds, rooftops, shadows, blur, or uncertainty alone. "
+        "Use detected_issues only for issues with visible evidence. Mention limits "
+        "from the single-frame aerial viewpoint. For each detected issue, include "
+        "a tight bounding_box around the visible evidence using normalized image "
+        "coordinates where x and y are the top-left corner and width and height "
+        "are fractions of the full image from 0 to 1."
+    )
+    payload = {
+        "model": settings.OPENAI_SAFETY_MODEL,
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt},
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:image/jpeg;base64,{image_data}",
+                        "detail": "high",
+                    },
+                ],
+            }
+        ],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "scout_safety_analysis",
+                "strict": True,
+                "schema": SAFETY_SCHEMA,
+            }
+        },
+    }
+
+    try:
+        response = httpx.post(
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=60,
+        )
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        detail = _openai_error_detail(exc.response)
+        raise HTTPException(status_code=502, detail=detail)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"OpenAI request failed: {exc}")
+
+    data = response.json()
+    try:
+        analysis = json.loads(_extract_response_text(data))
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=502, detail=f"OpenAI returned an invalid safety payload: {exc}"
+        )
+
+    analysis["categories_checked"] = SAFETY_CATEGORIES
+    analysis["model"] = settings.OPENAI_SAFETY_MODEL
+    return analysis
+
+
 def _get_or_create_location(
     *, session: SessionDep, name: str, description: str | None, bounds: GeoBounds
 ) -> ScoutLocation:
@@ -376,3 +542,26 @@ def _safe_storage_path(path: str) -> Path:
 def _example_label(patch: ScoutImagePatch) -> str:
     stem = Path(patch.file_path).stem.replace("-", " ").replace("_", " ")
     return stem.title()
+
+
+def _extract_response_text(data: dict[str, Any]) -> str:
+    if isinstance(data.get("output_text"), str):
+        return data["output_text"]
+    for item in data.get("output", []):
+        if item.get("type") != "message":
+            continue
+        for content in item.get("content", []):
+            if content.get("type") in {"output_text", "text"}:
+                return content["text"]
+    raise KeyError("response text not found")
+
+
+def _openai_error_detail(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        return f"OpenAI request failed with status {response.status_code}"
+    message = payload.get("error", {}).get("message")
+    if isinstance(message, str):
+        return message
+    return f"OpenAI request failed with status {response.status_code}"

@@ -1,4 +1,4 @@
-import { Briefcase, Radar, Users } from "lucide-react"
+import { Briefcase, RadioTower, Radar, Users } from "lucide-react"
 
 import { SidebarAppearance } from "@/components/Common/Appearance"
 import { Logo } from "@/components/Common/Logo"
@@ -14,6 +14,7 @@ import { User } from "./User"
 
 const baseItems: Item[] = [
   { icon: Radar, title: "Scout", path: "/" },
+  { icon: RadioTower, title: "Stream", path: "/stream" },
   { icon: Briefcase, title: "Items", path: "/items" },
 ]
 

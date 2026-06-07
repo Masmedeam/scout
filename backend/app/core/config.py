@@ -62,6 +62,8 @@ class Settings(BaseSettings):
     SCOUT_REDIS_INDEX: str = "scout-patches"
     WEAVE_ENABLED: bool = True
     WEAVE_PROJECT: str = "scout"
+    OPENAI_API_KEY: str | None = None
+    OPENAI_SAFETY_MODEL: str = "gpt-4.1-mini"
 
     @computed_field  # type: ignore[prop-decorator]
     @property

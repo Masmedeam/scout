@@ -30,6 +30,26 @@ SENTINEL2_EXPORT = (
     "https://sentinel.arcgis.com/arcgis/rest/services/"
     "Sentinel2/ImageServer/exportImage"
 )
+CDFW_NAIP_2022_EXPORT = (
+    "https://gis.wildlife.ca.gov/images/rest/services/"
+    "Base_Remote_Sensing/NAIP_2022/ImageServer/exportImage"
+)
+CDFW_NAIP_2020_EXPORT = (
+    "https://gis.wildlife.ca.gov/images/rest/services/"
+    "Base_Remote_Sensing/NAIP_2020/ImageServer/exportImage"
+)
+CDFW_NAIP_2018_EXPORT = (
+    "https://gis.wildlife.ca.gov/images/rest/services/"
+    "Base_Remote_Sensing/NAIP_2018/ImageServer/exportImage"
+)
+CDFW_NAIP_2016_EXPORT = (
+    "https://gis.wildlife.ca.gov/images/rest/services/"
+    "Base_Remote_Sensing/NAIP_2016/ImageServer/exportImage"
+)
+SF_PANCHROMATIC_EXPORT = (
+    "https://remotesensing.imagery.esri.com/image/rest/services/"
+    "San_Francisco_Panchromatic/ImageServer/exportImage"
+)
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
@@ -108,6 +128,45 @@ SCALE_LEVELS = [
 SF_BOUNDS = GeoBounds(-122.515, 37.703, -122.355, 37.835)
 
 IMAGERY_SOURCES = {
+    "cdfw-naip-2022": ArcgisImageSource(
+        slug="cdfw-naip-2022",
+        provider="California CDFW NAIP 2022 natural color",
+        export_url=CDFW_NAIP_2022_EXPORT,
+        license="California CDFW public NAIP imagery service; 60 cm natural color",
+        source_uri=CDFW_NAIP_2022_EXPORT,
+        capture_date="2022",
+    ),
+    "cdfw-naip-2020": ArcgisImageSource(
+        slug="cdfw-naip-2020",
+        provider="California CDFW NAIP 2020 natural color",
+        export_url=CDFW_NAIP_2020_EXPORT,
+        license="California CDFW public NAIP imagery service; 60 cm natural color",
+        source_uri=CDFW_NAIP_2020_EXPORT,
+        capture_date="2020",
+    ),
+    "cdfw-naip-2018": ArcgisImageSource(
+        slug="cdfw-naip-2018",
+        provider="California CDFW NAIP 2018 natural color",
+        export_url=CDFW_NAIP_2018_EXPORT,
+        license="California CDFW public NAIP imagery service; 60 cm natural color",
+        source_uri=CDFW_NAIP_2018_EXPORT,
+        capture_date="2018",
+    ),
+    "cdfw-naip-2016": ArcgisImageSource(
+        slug="cdfw-naip-2016",
+        provider="California CDFW NAIP 2016 natural color",
+        export_url=CDFW_NAIP_2016_EXPORT,
+        license="California CDFW public NAIP imagery service; 60 cm natural color",
+        source_uri=CDFW_NAIP_2016_EXPORT,
+        capture_date="2016",
+    ),
+    "sf-panchromatic": ArcgisImageSource(
+        slug="sf-panchromatic",
+        provider="San Francisco panchromatic ImageServer",
+        export_url=SF_PANCHROMATIC_EXPORT,
+        license="Esri sample San Francisco panchromatic imagery service",
+        source_uri=SF_PANCHROMATIC_EXPORT,
+    ),
     "usgs-naip-plus": ArcgisImageSource(
         slug="usgs-naip-plus",
         provider="USGS NAIP Plus",
@@ -280,17 +339,26 @@ def raster_filename(*, source: ArcgisImageSource, chip: SfChip) -> str:
 
 def build_sources(sources_arg: str | None, profile: str) -> list[ArcgisImageSource]:
     if sources_arg is None:
-        source_slugs = (
-            ["usgs-naip-plus"]
-            if profile != "diverse"
-            else [
+        if profile == "aerial":
+            source_slugs = [
+                "cdfw-naip-2022",
+                "cdfw-naip-2020",
+                "cdfw-naip-2018",
+                "cdfw-naip-2016",
+                "usgs-naip-plus",
+                "noaa-rgb-8bit",
+                "sf-panchromatic",
+            ]
+        elif profile == "diverse":
+            source_slugs = [
                 "usgs-naip-plus",
                 "usgs-naip-plus-false-color",
                 "noaa-rgb-8bit",
                 "sentinel2-natural-color",
                 "sentinel2-color-infrared",
             ]
-        )
+        else:
+            source_slugs = ["usgs-naip-plus"]
     else:
         source_slugs = [
             source.strip() for source in sources_arg.split(",") if source.strip()
@@ -309,13 +377,16 @@ def build_sources(sources_arg: str | None, profile: str) -> list[ArcgisImageSour
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Seed Scout with SF aerial imagery.")
     parser.add_argument(
-        "--profile", choices=("quick", "expanded", "diverse"), default="expanded"
+        "--profile",
+        choices=("quick", "expanded", "diverse", "aerial"),
+        default="expanded",
     )
     parser.add_argument(
         "--sources",
         default=None,
         help=(
-            "Comma-separated source slugs. Defaults to usgs-naip-plus, or to "
+            "Comma-separated source slugs. Defaults to usgs-naip-plus, to "
+            "natural aerial sources for --profile aerial, or to "
             "usgs-naip-plus,usgs-naip-plus-false-color,noaa-rgb-8bit,"
             "sentinel2-natural-color,sentinel2-color-infrared for --profile "
             "diverse."
@@ -339,7 +410,7 @@ def parse_args() -> argparse.Namespace:
 def build_chips(profile: str) -> list[SfChip]:
     if profile == "quick":
         return SF_QUICK_CHIPS
-    if profile == "diverse":
+    if profile in {"aerial", "diverse"}:
         return build_diverse_chips()
     return [
         SfChip(

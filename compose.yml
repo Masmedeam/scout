@@ -31,6 +31,29 @@ services:
     volumes:
       - app-redis-data:/data
 
+  stream:
+    image: scout-stream:latest
+    restart: always
+    networks:
+      - traefik-public
+      - default
+    build:
+      context: .
+      dockerfile: streaming/Dockerfile
+    ports:
+      - "1935:1935"
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.constraint-label=traefik-public
+      - traefik.http.services.${STACK_NAME?Variable not set}-stream.loadbalancer.server.port=8080
+      - traefik.http.routers.${STACK_NAME?Variable not set}-stream-http.rule=Host(`dashboard.${DOMAIN?Variable not set}`) && PathPrefix(`/live`)
+      - traefik.http.routers.${STACK_NAME?Variable not set}-stream-http.entrypoints=http
+      - traefik.http.routers.${STACK_NAME?Variable not set}-stream-https.rule=Host(`dashboard.${DOMAIN?Variable not set}`) && PathPrefix(`/live`)
+      - traefik.http.routers.${STACK_NAME?Variable not set}-stream-https.entrypoints=https
+      - traefik.http.routers.${STACK_NAME?Variable not set}-stream-https.tls=true
+      - traefik.http.routers.${STACK_NAME?Variable not set}-stream-https.tls.certresolver=le
+
   adminer:
     image: adminer
     restart: always
